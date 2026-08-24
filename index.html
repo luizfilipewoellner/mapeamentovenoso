@@ -185,7 +185,11 @@
     position:relative; width:100%; height:0; touch-action:none; overflow:hidden;
     border:1px solid var(--line); border-radius:6px; background:#fff;
   }
-  .canvas-holder.pencil-mode{touch-action:pan-y;}
+  /* Always block native touch gestures (scroll/pan) on the drawing surface itself, in every
+     mode — on iPadOS, allowing pan-y here would let the browser hijack Apple Pencil drags
+     for page scrolling too (touch-action isn't pointer-type specific), interrupting strokes.
+     With "Só Pencil" on, a resting finger is simply ignored by the drawing logic instead;
+     the page can still be scrolled from anywhere outside the canvas. */
   .canvas-holder img{position:absolute; top:0; left:0; width:100%; height:100%; display:block; -webkit-user-select:none; user-select:none; pointer-events:none;}
   .canvas-holder canvas{position:absolute; top:0; left:0; width:100%; height:100%;}
 
@@ -302,6 +306,7 @@
     <span class="brand">MAPEAMENTO VENOSO · Dr. Luiz Filipe Woellner</span>
     <div class="actions">
       <button class="secondary" id="clearAllBtn" type="button">Limpar tudo</button>
+      <button class="secondary" id="driveBtn" type="button">Salvar no Drive</button>
       <button id="printBtn" type="button">Gerar PDF</button>
     </div>
   </div>
@@ -990,11 +995,8 @@
     return safeName + ' - Desenho MAP ' + legPart + ' - ' + datePart + '.pdf';
   }
 
-  document.getElementById('printBtn').addEventListener('click', async function(){
-    const btn = this;
-    const original = btn.textContent;
-    btn.textContent = 'Gerando...';
-    btn.disabled = true;
+  // Builds the PDF and returns it as a Blob (shared by "Gerar PDF" and "Salvar no Drive").
+  async function generatePdfBlob(){
     document.body.classList.add('pdf-export');
     legR.resize(); legL.resize();
     await new Promise(function(r){ setTimeout(r, 60); });
@@ -1015,13 +1017,72 @@
         if(i > 0) pdf.addPage();
         pdf.addImage(imgData, 'JPEG', x, y, imgW, imgH);
       }
-      pdf.save(buildPdfFilename());
+      return pdf.output('blob');
+    } finally {
+      document.body.classList.remove('pdf-export');
+      legR.resize(); legL.resize();
+    }
+  }
+
+  function triggerDownload(blob, filename){
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+  }
+
+  document.getElementById('printBtn').addEventListener('click', async function(){
+    const btn = this;
+    const original = btn.textContent;
+    btn.textContent = 'Gerando...';
+    btn.disabled = true;
+    try{
+      const blob = await generatePdfBlob();
+      triggerDownload(blob, buildPdfFilename());
     } catch(err){
       await showInfo('Não foi possível gerar o PDF automaticamente. Use o compartilhamento do navegador (ícone de impressão/AirPrint) para imprimir ou salvar.');
       console.error(err);
     } finally {
-      document.body.classList.remove('pdf-export');
-      legR.resize(); legL.resize();
+      btn.textContent = original;
+      btn.disabled = false;
+    }
+  });
+
+  // "Salvar no Drive": gera o mesmo PDF e abre o menu nativo de compartilhamento do
+  // iOS/Safari, de onde dá para escolher "Salvar no Drive" (app Google Drive) ou
+  // "Salvar em Arquivos" → Google Drive. Uma integração direta com a API do Google
+  // Drive exigiria um projeto Google Cloud com OAuth vinculado a um domínio fixo,
+  // o que não é viável para um arquivo HTML avulso como este.
+  document.getElementById('driveBtn').addEventListener('click', async function(){
+    const btn = this;
+    const original = btn.textContent;
+    btn.textContent = 'Gerando...';
+    btn.disabled = true;
+    try{
+      const blob = await generatePdfBlob();
+      const filename = buildPdfFilename();
+      const file = new File([blob], filename, { type:'application/pdf' });
+      if(navigator.canShare && navigator.canShare({ files:[file] })){
+        try{
+          await navigator.share({ files:[file], title: filename });
+        } catch(shareErr){
+          if(shareErr && shareErr.name !== 'AbortError'){
+            triggerDownload(blob, filename);
+            await showInfo('Não foi possível abrir o menu de compartilhamento. O PDF foi baixado — você pode enviá-lo ao Google Drive pelo app Arquivos ou pelo app do Drive.');
+          }
+        }
+      } else {
+        triggerDownload(blob, filename);
+        await showInfo('Compartilhamento direto não está disponível neste navegador. O PDF foi baixado — abra o app Arquivos ou o Google Drive e importe o arquivo salvo.');
+      }
+    } catch(err){
+      await showInfo('Não foi possível gerar o PDF automaticamente.');
+      console.error(err);
+    } finally {
       btn.textContent = original;
       btn.disabled = false;
     }
